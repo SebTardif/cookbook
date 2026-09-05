@@ -1,4 +1,5 @@
-import { createInterface } from "node:readline/promises";
+import { realpathSync } from "node:fs";
+import { createInterface } from "node:readline";
 import { stdin as defaultInput, stdout as defaultOutput } from "node:process";
 import { pathToFileURL } from "node:url";
 import { OpenClaw, type Run } from "@openclaw/sdk";
@@ -7,7 +8,6 @@ type CliState = {
   agentId: string;
   sessionKey: string;
   model?: string;
-  currentRun: Run | null;
 };
 
 export type CodingAgentCliOptions = {
@@ -31,7 +31,7 @@ function help(): string {
 
 function isDirectRun(metaUrl: string): boolean {
   const entry = process.argv[1];
-  return entry ? metaUrl === pathToFileURL(entry).href : false;
+  return entry ? metaUrl === pathToFileURL(realpathSync(entry)).href : false;
 }
 
 export async function runCodingAgentCli(options: CodingAgentCliOptions = {}): Promise<void> {
@@ -51,19 +51,44 @@ export async function runCodingAgentCli(options: CodingAgentCliOptions = {}): Pr
     agentId: process.env.OPENCLAW_AGENT_ID ?? "main",
     sessionKey: process.env.OPENCLAW_SESSION_KEY ?? "cli",
     model: process.env.OPENCLAW_MODEL,
-    currentRun: null,
   };
 
+  let runCreated: Promise<Run> | null = null;
+  let inFlight: Promise<void> | null = null;
+  let cancellation: Promise<boolean> | null = null;
+
+  async function cancelActiveRun(announceIdle = true): Promise<boolean> {
+    const created = runCreated;
+    if (!created) {
+      if (announceIdle) output.write("No active run.\n");
+      return true;
+    }
+    if (!cancellation) {
+      // Await the handle so cancellation requested during startup is retained.
+      cancellation = (async () => {
+        const run = await created;
+        output.write(`${JSON.stringify(await run.cancel(), null, 2)}\n`);
+        return true;
+      })().catch((error: unknown) => {
+        if (runCreated === created) cancellation = null;
+        const message = error instanceof Error ? error.message : String(error);
+        output.write(`Cancellation failed: ${message}. Try /cancel again.\n`);
+        return false;
+      });
+    }
+    return cancellation;
+  }
+
   async function sendPrompt(prompt: string): Promise<void> {
-    const run = await oc.runs.create({
-      input: prompt,
-      agentId: state.agentId,
-      sessionKey: state.sessionKey,
-      timeoutMs: 300_000,
-      ...(state.model ? { model: state.model } : {}),
-    });
-    state.currentRun = run;
     try {
+      runCreated = oc.runs.create({
+        input: prompt,
+        agentId: state.agentId,
+        sessionKey: state.sessionKey,
+        timeoutMs: 300_000,
+        ...(state.model ? { model: state.model } : {}),
+      });
+      const run = await runCreated;
       for await (const event of run.events()) {
         if (event.type === "assistant.delta") {
           const delta = (event.data as { delta?: unknown }).delta;
@@ -86,9 +111,8 @@ export async function runCodingAgentCli(options: CodingAgentCliOptions = {}): Pr
       const result = await run.wait({ timeoutMs: 120_000 });
       output.write(`\n${JSON.stringify(result, null, 2)}\n`);
     } finally {
-      if (state.currentRun === run) {
-        state.currentRun = null;
-      }
+      runCreated = null;
+      cancellation = null;
     }
   }
 
@@ -110,15 +134,11 @@ export async function runCodingAgentCli(options: CodingAgentCliOptions = {}): Pr
         output.write(`${JSON.stringify(await oc.models.status({ probe: false }), null, 2)}\n`);
         return true;
       case "/cancel":
-        if (!state.currentRun) {
-          output.write("No active run.\n");
-          return true;
-        }
-        output.write(`${JSON.stringify(await state.currentRun.cancel(), null, 2)}\n`);
+        await cancelActiveRun();
         return true;
       case "/exit":
       case "/quit":
-        return false;
+        return !(await cancelActiveRun(false));
       default:
         output.write("Unknown command. Type /help.\n");
         return true;
@@ -132,56 +152,44 @@ export async function runCodingAgentCli(options: CodingAgentCliOptions = {}): Pr
     } else {
       output.write(`${help()}\n\n`);
       const rl = createInterface({ input, output });
-      let inFlight: Promise<void> | null = null;
-      const cancelActiveRun = async (): Promise<void> => {
-        if (state.currentRun) {
-          output.write(`${JSON.stringify(await state.currentRun.cancel(), null, 2)}\n`);
-        }
-      };
+      rl.setPrompt("openclaw> ");
       rl.on("SIGINT", () => {
-        if (state.currentRun) {
+        if (inFlight) {
           void cancelActiveRun();
-          return;
+        } else {
+          rl.close();
         }
-        rl.close();
       });
       try {
-        for (;;) {
-          let line: string;
-          try {
-            line = await rl.question("openclaw> ");
-          } catch {
-            break;
-          }
-          if (!line.trim()) {
-            continue;
-          }
-          if (line.startsWith("/")) {
-            const keepGoing = await runCommand(line);
-            if (!keepGoing) {
-              await cancelActiveRun();
-              if (inFlight) {
-                await inFlight;
-              }
-              break;
+        rl.prompt();
+        // The iterator settles on EOF and idle Ctrl+C, unlike a pending question().
+        for await (const line of rl) {
+          const trimmed = line.trim();
+          if (trimmed.startsWith("/")) {
+            try {
+              if (!(await runCommand(trimmed))) break;
+            } catch (error) {
+              output.write(`${error instanceof Error ? error.message : String(error)}\n`);
             }
-            continue;
+          } else if (trimmed) {
+            if (inFlight) {
+              output.write("A run is already active. Type /cancel to stop it.\n");
+            } else {
+              inFlight = sendPrompt(trimmed)
+                .catch((error: unknown) => {
+                  const message = error instanceof Error ? error.message : String(error);
+                  output.write(`\n${message}\n`);
+                })
+                .finally(() => {
+                  inFlight = null;
+                });
+            }
           }
-          if (inFlight) {
-            output.write("A run is already active. Type /cancel to stop it.\n");
-            continue;
-          }
-          inFlight = sendPrompt(line)
-            .catch((error: unknown) => {
-              const message = error instanceof Error ? error.message : String(error);
-              output.write(`\n${message}\n`);
-            })
-            .finally(() => {
-              inFlight = null;
-            });
+          rl.prompt();
         }
       } finally {
         rl.close();
+        if (inFlight && (await cancelActiveRun(false))) await inFlight;
       }
     }
   } finally {

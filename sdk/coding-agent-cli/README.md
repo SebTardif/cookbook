@@ -29,3 +29,8 @@ pnpm dev
 - `/cancel` cancels the active run. Type it while events are still streaming.
 - Ctrl+C also cancels the active run. A second Ctrl+C exits when idle.
 - `/exit` exits.
+
+Cancellation requested during startup waits for the run handle. If cancellation
+fails, the CLI reports the error and stays available for another `/cancel` or
+`/exit`. Ctrl+C cancels while a run is active and exits when idle. Closing input
+also attempts cancellation before closing the SDK client.
