@@ -34,3 +34,6 @@ Cancellation requested during startup waits for the run handle. If cancellation
 fails, the CLI reports the error and stays available for another `/cancel` or
 `/exit`. Ctrl+C cancels while a run is active and exits when idle. Closing input
 also attempts cancellation before closing the SDK client.
+
+Structured JSON output masks session keys and credential-like fields, matching the
+cookbook recipes. Streamed assistant text remains verbatim.

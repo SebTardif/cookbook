@@ -3,6 +3,7 @@ import { createInterface } from "node:readline";
 import { stdin as defaultInput, stdout as defaultOutput } from "node:process";
 import { pathToFileURL } from "node:url";
 import { OpenClaw, type Run } from "@openclaw/sdk";
+import { redactSensitiveOutput } from "./redact-sensitive-output.js";
 
 type CliState = {
   agentId: string;
@@ -67,7 +68,7 @@ export async function runCodingAgentCli(options: CodingAgentCliOptions = {}): Pr
       // Await the handle so cancellation requested during startup is retained.
       cancellation = (async () => {
         const run = await created;
-        output.write(`${JSON.stringify(await run.cancel(), null, 2)}\n`);
+        output.write(`${JSON.stringify(redactSensitiveOutput(await run.cancel()), null, 2)}\n`);
         return true;
       })().catch((error: unknown) => {
         if (runCreated === created) cancellation = null;
@@ -109,7 +110,7 @@ export async function runCodingAgentCli(options: CodingAgentCliOptions = {}): Pr
         }
       }
       const result = await run.wait({ timeoutMs: 120_000 });
-      output.write(`\n${JSON.stringify(result, null, 2)}\n`);
+      output.write(`\n${JSON.stringify(redactSensitiveOutput(result), null, 2)}\n`);
     } finally {
       runCreated = null;
       cancellation = null;
@@ -131,7 +132,9 @@ export async function runCodingAgentCli(options: CodingAgentCliOptions = {}): Pr
         output.write(`session=${state.sessionKey}\n`);
         return true;
       case "/status":
-        output.write(`${JSON.stringify(await oc.models.status({ probe: false }), null, 2)}\n`);
+        output.write(
+          `${JSON.stringify(redactSensitiveOutput(await oc.models.status({ probe: false })), null, 2)}\n`,
+        );
         return true;
       case "/cancel":
         await cancelActiveRun();
