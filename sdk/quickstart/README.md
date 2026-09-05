@@ -24,3 +24,6 @@ pnpm start
 
 Set `OPENCLAW_AGENT_ID`, `OPENCLAW_SESSION_KEY`, or `OPENCLAW_MODEL` to override
 the defaults.
+
+Structured JSON output masks session keys and credential-like fields, matching the
+cookbook recipes. Streamed assistant text remains verbatim.
